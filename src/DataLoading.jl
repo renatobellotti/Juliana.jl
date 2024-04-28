@@ -3,54 +3,59 @@ using DataFrames
 using JSON
 using Logging
 using NPZ
+using StaticArrays
 
 
 CACHE_DIR::String = get(ENV, "JULIANA_CACHE_DIR", "$(homedir())/juliana_cache")
 mkpath(CACHE_DIR)
 
 
-struct Grid{S, T}
-    spacing::Array{S, 1}
-    origin::Array{S, 1}
-    size::Array{T, 1}
+function parse_plan_file(path)
+    plan = JSON.parsefile(path)
+    fields = plan["fields"]
+    return BeamArrangement(
+        convert.(Float32, [f["gantry_angle"] for f in fields]),
+        convert.(Float32, [f["couch_angle"] for f in fields]),
+        convert.(Float32, [f["nozzle_extraction"] for f in fields]),
+    )
 end
 
 
-struct ScalarGrid{A<:AbstractArray, S, T}
-    data::A
-    grid::Grid{S, T}
-end
+"""
+    load_patient_data(data_dir::String,
+                      patient_ID::String;
+                      series::Integer=0) -> Juliana.PatientData
+"""
+function load_patient_data(data_dir::String, patient_ID::String; series::Integer=0)
+    ct_path = "$(data_dir)/CTs/$(patient_ID)_$series.dat"
+    ct = Juliana.load_ct_dat_file(ct_path);
 
+    structure_names = Juliana.structure_names(data_dir, patient_ID)
+    structures_to_load = [name for name in structure_names if !(name in ["AUTO_FULL_BODY", "BODY"])]
+    structures = Juliana.load_structures(
+        data_dir,
+        patient_ID,
+        ct.grid,
+        which=structures_to_load,
+    );
+    for (name, structure) in structures
+        structures[name] = Structure(
+            structure.name,
+            structure.points[:, 1:3],
+            structure.mask,
+            structure.distanceFromStructure,
+            structure.grid,
+            structure.is_target,
+        )
+    end
 
-struct Structure{A<:AbstractArray, B<:AbstractArray, C<:AbstractArray, S, T}
-    name::String
-    points::A
-    mask::B
-    # This is actually only the in-slice distance. We do not consider z!
-    distanceFromStructure::C
-    grid::Grid{S, T}
-    is_target::Bool
-end
+    prescriptions = Juliana.load_prescriptions(data_dir, patient_ID, structures);
 
-
-@enum ConstraintType constraint_dvh_d constraint_dvh_v constraint_mean constraint_max constraint_unknown_type
-@enum ConstraintDirection upper_constraint lower_constraint
-@enum ConstraintPriority hard soft unknown_priority
-
-
-struct Constraint{T}
-    structure_name::String
-    kind::ConstraintType
-    dose::T
-    volume::Union{Nothing, T}
-    priority::ConstraintPriority
-    direction::ConstraintDirection
-end
-
-
-struct Prescriptions{T}
-    target_doses::Vector{Tuple{String, T}}
-    constraints::Array{Constraint, 1}
+    return ct_path, PatientData(
+        ct,
+        structures,
+        prescriptions,
+    )
 end
 
 
@@ -81,14 +86,40 @@ function load_dat_file(T, path::String, read_orientation::Bool)
         data = collect(reinterpret(T, buffer))
         data = reshape(data, data_size)
 
-        grid = Grid(spacing, origin, collect(data_size))
+        grid = Grid(
+            SVector{3}(spacing),
+            SVector{3}(origin),
+            SVector{3}(collect(data_size)),
+        )
         return ScalarGrid(data, grid)
+    end
+end
+
+
+function write_ct_dat_file(path::String, ct::Juliana.ScalarGrid)
+    @assert eltype(typeof(ct.data)) == Int16
+    open(path, "w") do file
+        write(file, reinterpret(UInt8, b"\x48\x46\x53")) #HFS
+        write(file, reinterpret(UInt8, convert.(Float32, collect(ct.grid.origin))))
+        write(file, reinterpret(UInt8, collect(ct.grid.spacing)))
+        write(file, reinterpret(UInt8, collect(convert.(Int32, size(ct.data)))))
+        write(file, reinterpret(UInt8, vec(ct.data)));
     end
 end
 
 
 function load_ct_dat_file(path::String)
     return load_dat_file(Int16, path, true)
+end
+
+
+function write_dose_dat_file(path::String, dose::Juliana.ScalarGrid)
+    open(path, "w") do file
+        write(file, reinterpret(UInt8, convert.(Float32, dose.grid.origin)))
+        write(file, reinterpret(UInt8, dose.grid.spacing))
+        write(file, reinterpret(UInt8, collect(convert.(Int32, size(dose.data)))))
+        write(file, reinterpret(UInt8, vec(dose.data)));
+    end
 end
 
 
@@ -114,13 +145,27 @@ end
 
 function load_npy_structure(name::String, path::String, grid::Grid{S, T}, is_target::Bool) where {S, T}
     points = Array{Float32, 2}(npzread(path))
-    contours = split_by_z(points);
+    if size(points, 2) == 3
+        new = Array{Float32, 2}(undef, size(points, 1), 4)
+        new[:, 1:3] .= points
+        contours = split_by_z(points);
+        i = 1
+        index = 1
+        for contour in contours
+            new[i:i+size(contour, 1)'-1, 4] .= index
+            i += size(contour, 1)
+            index += 1
+        end
+        points = new
+    end
+
+    contours = split_by_contour_index(points)
     distance_mask = calculate_distance_mask(
         Tuple(grid.size),
         grid.spacing,
         contours,
     )
-    binary_mask = to_binary_mask(distance_mask)
+    binary_mask = to_binary_mask(distance_mask, max_distance=0.5*minimum(grid.spacing))
     return Structure(name, points, binary_mask, distance_mask, grid, is_target)
 end
 
@@ -170,15 +215,10 @@ end
 
 
 # Prescriptions.
-function load_prescriptions(data_dir, patient_ID, structures)
-    target_doses = load_target_doses(data_dir, patient_ID)
-    target_dose = maximum(values(target_doses))
-    target_doses = [(name, dose) for (name, dose) in target_doses]
+function parse_oar_constraints_file(path, target_dose, structures; T=Float32)
+    df = DataFrame(CSV.File(path));
 
-    constraints_path = "$(data_dir)/prescriptions/$(patient_ID)_constraints.csv"
-    df = DataFrame(CSV.File(constraints_path));
-
-    constraints = Array{Constraint, 1}(undef, 0)
+    constraints = Array{Constraint{T}, 1}(undef, 0)
     for row in eachrow(df)
         if !(row.structure_name in keys(structures))
             @warn "Could not find a structure named $(row.structure_name)"
@@ -205,7 +245,27 @@ function load_prescriptions(data_dir, patient_ID, structures)
         )
         push!(constraints, constraint)
     end
-    return Prescriptions(target_doses, constraints)
+
+    return constraints
+end
+
+
+function load_prescriptions(data_dir, patient_ID, structures)
+    target_doses = load_target_doses(data_dir, patient_ID)
+    target_dose = maximum(values(target_doses))
+    target_doses = [(name, dose) for (name, dose) in target_doses]
+
+    T = typeof(target_dose)
+
+    constraints_path = "$(data_dir)/prescriptions/$(patient_ID)_constraints.csv"
+    constraints = parse_oar_constraints_file(
+        constraints_path,
+        target_dose,
+        structures;
+        T=T,
+    )
+    
+    return Prescriptions{T}(target_doses, constraints)
 end
 
 
@@ -233,7 +293,9 @@ function parse_dose(dose::AbstractString, target_dose_gy::T) where {T}
         dose = parse(T, dose)
     elseif is_percentage(dose)
         dose = replace(dose, "%" => "")
-        dose = parse(T, dose) * target_dose_gy / convert(T, 100) 
+        dose = parse(T, dose) * target_dose_gy / convert(T, 100)
+    elseif dose == "unknown"
+        dose = convert(T, NaN)
     else
         error("Could not parse dose string '$dose'")
     end
@@ -286,15 +348,17 @@ function build_constraint(structure_name::AbstractString,
         volume = parse_volume(constraint_quantity[2:end], structure_volume)
     elseif !isnothing(match(dvh_V_pattern, constraint_quantity))
         # V<dose> < threshold
-        kind = consqtraint_dvh_v
+        kind = constraint_dvh_v
         # Remove the "V" at the beginning.
         dose = parse_dose(constraint_quantity[2:end], target_dose)
-        volume = parse_volume(threshold, structure_volume)
+        volume = parse_volume(constraint_threshold, structure_volume)
     else
-        error("Could not parse constraint $constraint")
+        kind = constraint_unknown_type
+        dose = convert(T, NaN)
+        volume = convert(T, NaN)
     end
 
-    constraint = Constraint(
+    constraint = Constraint{T}(
         String(structure_name),
         kind,
         dose,
@@ -383,9 +447,9 @@ function read_from_cache(cache_dir::String,
     
     grid_dict = JSON.parsefile("$(basename)_grid.json")
     grid = Grid(
-        convert(Vector{Float32}, grid_dict["spacing"]),
-        convert(Vector{Float32}, grid_dict["origin"]),
-        convert(Vector{Int32}, grid_dict["size"]),
+        SVector{3}(convert(Vector{Float32}, grid_dict["spacing"])),
+        SVector{3}(convert(Vector{Float32}, grid_dict["origin"])),
+        SVector{3}(convert(Vector{Int32}, grid_dict["size"])),
     )
     is_target = false
     open("$(basename)_isTarget.txt", "r") do file
@@ -405,22 +469,48 @@ function read_from_cache(cache_dir::String,
 end
 
 
-function xyz_to_index(point_xyz, grid) where {T}
-    # +1: Indices in Julia start at 1.
-    # Ex.: The origin is zero, spacing 1.
-    #      The point (0.4, 0.4, 0.4) should have index (1, 1, 1).
-    return convert.(Int32, round.((point_xyz .- grid.origin) ./ grid.spacing) .+ 1)
+"""
+    cached_structures(cache_dir::String, patient_ID::String; series=0)
+
+Return a set trhat contains the names of all structures that are in the cache.
+This function does NOT check whether the cache entry is complete!
+"""
+function cached_structures(cache_dir::String, patient_ID::String; series=0)
+    if !ispath("$(cache_dir)/$(patient_ID)")
+        return Set{String}()
+    end
+    filenames = readdir("$(cache_dir)/$(patient_ID)")
+    filenames = [f for f in filenames if startswith(f, string(series))]
+    # Remove the "_binary_mask.npy" and so on, then concatenate.
+    structure_names = Set{String}()
+    to_delete = (
+        "_binary_mask.npy",
+        "_distanceFromStructure.npy",
+        "_grid.json",
+        "_isTarget.txt",
+        "_points.npy",
+    )
+    for filename in filenames
+        name = replace(filename, "$(series)_" => "", count=1)
+        for s in to_delete
+            name = replace(name, s => "")
+        end
+        push!(structure_names, name)
+    end
+    return structure_names
 end
 
-# function xyz_to_index(points, grid)
-#     return collect(hcat([xyz_to_index(point, grid) for point in eachrow(points)]...)')
-# end
 
-function index_to_xyz(index, grid) where {T}
-    # -1: Indices in Julia start at 1.
-    return grid.origin .+ grid.spacing .* (index .- 1)
+function write_plan_config(path::String, config::TreatmentPlan)
+    open(path, "w") do file
+        write(file, JSON.json(config, 4))
+    end
 end
 
-# function index_to_xyz(indices, grid)
-#     return collect(hcat([index_to_xyz(index, grid) for index in eachrow(indices)]...)')
-# end
+
+function read_plan_file(path::String)
+    open(path, "r") do file
+        plan_dict = JSON.parse(file)
+        return TreatmentPlan(plan_dict)
+    end
+end

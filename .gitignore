@@ -4,7 +4,11 @@ logs/
 output/
 executed_notebooks/
 *.png
+*.dat
+*.json
 *.csv
-julia-1.8.1*
-pyftpp/bin
-pyftpp/build
+*.txt
+*.properties
+*.npy
+*.dcm
+docs/build/

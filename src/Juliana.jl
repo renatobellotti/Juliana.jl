@@ -1,13 +1,34 @@
 module Juliana
-export PatientInfo, getOptimisationConfiguration
 
+include("DataStructures.jl")
+include("Interpolation.jl")
+include("Util.jl")
+include("CoordinateTransformations.jl")
+include("DvhCalculations.jl")
 include("DistanceCalculations.jl")
 include("DataLoading.jl")
-include("DvhLosses.jl")
+include("Dicom.jl")
 include("IdealDoseDistribution.jl")
 include("Losses.jl")
-include("fiona_standalone/FionaStandalone.jl")
 include("OptimisationHelpers.jl")
+include("Optimisation.jl")
+include("InBeamMask.jl")
 include("Plotting.jl")
+include("BeamAngleOptimisation.jl")
+include("Wed.jl")
+include("DoseCalculation.jl")
+include("DoseCalculationHighLevel.jl")
+include("SpotPlacement.jl")
+include("Phantom.jl")
+include("Reporting.jl")
+include("ParseMachineParameters.jl")
+include("PSIPlan.jl")
+include("Ntcp.jl")
+include("Tps.jl")
+include("Robustness.jl")
+include("OptimisationAdvanced.jl")
+include("SteeringFiles.jl")
+# This should always be the last file to be included.
+include("Precompile.jl")
 
 end

@@ -1,43 +1,11 @@
 using CUDA
-using KernelAbstractions
-using CUDAKernels
-using Interpolations
-using Statistics
-using Zygote
 
 # Units: Gy always!!!
 
 
-struct OptimisationConfiguration{NumberType, VolumeType, DijType}
-    normalisationDose::NumberType
-    normalisationStructureMask::VolumeType
-    ct::VolumeType
-    idealDose::VolumeType
-    importance::VolumeType
-    minimumDose::VolumeType
-    Dij::DijType
-    structures::Dict{String, VolumeType}
-    prescriptions::Juliana.Prescriptions
-end
-
-
 function mean_dose(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}) where {T, N}
-    if sum(mask) == 0
-        return zero(T)
-    else
-        # Copy to the CPU for the element-wise access.
-        structure_dose = dose[mask .== one(T)]
-        return Statistics.mean(structure_dose)
-    end
-end
-
-
-function minimum_dose(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}) where {T, N}
-    # Copy to the CPU to allow for fast indexing.
-    # mask = Array(mask)
-    # structure_dose = Array(dose)[mask .== one(T)]
-    structure_dose = dose[mask .== one(T)]
-    return minimum(structure_dose)
+    # @assert sum(mask) > zero(T)
+    sum(dose .* mask) / sum(mask)
 end
 
 
@@ -45,114 +13,19 @@ function variance_dose(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}) whe
     μ = mean_dose(dose, mask)
     structure_dose = dose[mask .== one(T)]
     n_voxels_in_structure = size(structure_dose, 1)
-    if n_voxels_in_structure > zero(T)
-        return sum((structure_dose .- μ).^2) ./ n_voxels_in_structure
-    else
-        return zero(T)
-    end
+    @assert n_voxels_in_structure > zero(T)
+    return sum((structure_dose .- μ).^2) ./ n_voxels_in_structure
 end
 
 
-function maximum_dose(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}) where {T, N}
-    return maximum(dose .* mask)
+function variance_dose_gradient(dose, mask)
+    N_target = sum(mask)
+    return 2 / N_target .* (dose .- mean_dose(dose, mask)) .* mask
 end
 
 
-function my_percentile(x::AbstractArray{T, 1}, percentage::T) where {T}
-    x = sort(x)
-    i = max(round(percentage / convert(T, 100) * length(x)), one(T))
-    i = convert(Integer, i)
-    return x[i]
-end
-
-function my_percentile(x::AbstractArray{T, 1}, percentage::AbstractArray{T, 1}) where {T}
-    return [my_percentile(x, p) for p in percentage]
-end
-
-
-function dvh_d(dose, mask, v::T) where {T}
-    """
-    Calculates D_<v>%, i. e. the dose to the coldest v% of the voxels in the
-    given structure.
-    """
-    # We copy to the host because quantile needs access by element,
-    # which is very slow on the GPU.
-    mask_array = Array(mask)
-    structure_dose = reduce(vcat, Array(dose)[mask_array .== 1])
-    p = my_percentile(structure_dose, v)
-    return p
-end
-
-
-# Need to reimplement linear interpolation because Zygote cannot deal with it.
-function linear_interpolation(x::AbstractArray{T, N}, y::AbstractArray{T, N}, x_eval::T) where {T, N}
-    if x_eval <= x[1]
-        return y[1]
-    end
-    if x_eval >= x[end]
-        return y[end]
-    end
-    i = 1
-    while x_eval > x[i]
-        i = i + 1
-    end
-
-    x0 = x[i-1]
-    x1 = x[i]
-    y0 = y[i-1]
-    y1 = y[i]
-
-    return y0 + (x_eval - x0) * (y1 - y0) / (x1 - x0 + eps(T))
-end
-
-
-function linear_interpolation(x::AbstractArray{T, N}, y::AbstractArray{T, N}, x_eval::AbstractArray{T}) where {T, N}
-    out = zero(T, x_eval)
-    for i in size(x)[1]
-        if x_eval[i] <= x[1]
-            out[i] = y[1]
-            continue
-        end
-        if x_eval[i] >= x[end]
-            out[i] = y[end]
-            continue
-        end
-        k = 1
-        while x_eval[i] > x[k]
-            k = k + 1
-        end
-
-        x0 = x[k-1]
-        x1 = x[k]
-        y0 = y[k-1]
-        y1 = y[k]
-
-        out[i] = y0 + (x_eval - x0) * (y1 - y0) / (x1 - x0 + eps(T))
-    end
-    return out
-end
-
-
-function dvh_v(dose, mask, d)
-    """
-    Calculates an approximation to V_<d>Gy, i. e. the volume that receives
-    at least <d>Gy dose.
-    """
-    volume_fractions = collect(LinRange(0.f0, 100.f0, 401))
-    dose_values = dvh_d(dose, mask, volume_fractions)
-
-    f = Interpolations.linear_interpolation(dose_values, volume_fractions[end:-1:1], extrapolation_bc=Interpolations.Flat())
-    return f(d)
-end
-
-
-function normalise_dose(dose, mask, normalisation_dose)
-    return dose .* (normalisation_dose / mean_dose(dose, mask))
-end
-
-
-function normalisation_loss(dose::AbstractArray{T, N}, normalisationStructureMask::AbstractArray{T, N}, normalisationDose::T) where {T, N}
-    return (mean_dose(dose, normalisationStructureMask) - normalisationDose)^2
+function variance_dose_gradient(dose::CuArray, mask::CuArray)
+    return cu(variance_dose_gradient(collect(dose), collect(mask)))
 end
 
 
@@ -161,41 +34,24 @@ function hotspot_loss(dose::AbstractArray{T, N}, threshold::T) where {T, N}
 end
 
 
+# function hotspot_loss(dose::CuArray{T, N}, threshold::T) where {T, N}
+#     # collect(): Transfer to the CPU to avoid excessive memory allocations.
+#     return sum(max.(collect(dose) .- threshold, zero(T)))
+# end
+
+
 function hotspot_loss(dose::AbstractArray{T, N}, threshold::AbstractArray{T, N}) where {T, N}
     # Voxel-wise maximum value.
     return sum(max.(dose .- threshold, zero(T)))
 end
 
 
-function coldspot_loss(dose::AbstractArray{T, N}, threshold::AbstractArray{T, N}) where {T, N}
-    # Voxel-wise minimum value.
-    return sum(max.(threshold .- dose, zero(T)))
-end
+# function hotspot_loss(dose::CuArray{T, N}, threshold::AbstractArray{T, N}) where {T, N}
+#     # collect(): Transfer to the CPU to avoid excessive memory allocations.
+#     # Voxel-wise maximum value.
+#     return sum(max.(collect(dose) .- collect(threshold), zero(T)))
+# end
 
-
-# function dvh_d_loss(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}, d::T, v::T) where {T, N}
-#     # Objective for ensuring that Dv% <= d.
-#     # "The coldest (100-v)% of structure voxels receive no more than dose d."
-#     # That means that a fraction of v% of voxels is allowed to violate the constraint.
-#     # If we clip the achieved dose values from above at d, resulting in d_clip,
-#     # then a fulfilling configuration will have sum(d_clip) <= v% * d
-
-
-#     # This means that a fraction v of the voxels have at most dose d.
-#     # In other words, the sum of the dose in target voxels clamped from below at d
-#     # should be n_target_voxels * (1 - v) or smaller. Everything above means we
-#     # do not fulfill the condition.
-#     structure_dose = dose .* mask
-#     n_target_voxels = sum(mask)
-
-#     excess_dose = max.(zero(T), structure_dose .- d)
-#     loss = max.(0., deviation)
-#     # structure_dose_clamped = clamp.(structure_dose, d, Inf)
-
-#     # loss = max(
-#     #     zero(T),
-#     #     sum(structure_dose_clamped) - (1 - convert(T, v)) * n_target_voxels * d,
-#     # )
 
 """Loss function that ensures Dmax <= threshold for the given structure."""
 function Dmax_loss(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}, threshold::T) where {T, N}
@@ -205,68 +61,156 @@ function Dmax_loss(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}, thresho
 end
 
 
-"""Loss function that ensures Dmin <= threshold for the given structure."""
-    function Dmin_loss(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}, threshold::T) where {T, N}
-        lacking_dose = max.(zero(T), threshold .- dose)
-        lacking_dose_structure = lacking_dose .* mask
-        loss = sum(lacking_dose_structure)
+function Dmax_loss_gradient(dose::AbstractArray{T, N}, mask::AbstractArray{T, N}, threshold::T) where {T, N}
+    return convert.(T, dose .* mask .>= threshold)
+end
+
+
+function Dmax_loss_gradient(dose::CuArray{T, N}, mask::CuArray{T, N}, threshold::T) where {T, N}
+    return cu(Dmax_loss_gradient(collect(dose), collect(mask), threshold))
+end
+
+
+function ideal_dose_loss(dose::AbstractArray{T, N}, importance, ideal_dose) where {T, N}
+    return dot(
+        importance,
+        (ideal_dose .- dose).^2,
+    ) / sum(importance) / convert(T, 25)
+end
+
+
+function ideal_dose_loss_gradient(dose::AbstractArray{T, N}, importance, ideal_dose) where {T, N}
+    return 2 .* importance .* (dose .- ideal_dose) ./ sum(importance) ./ convert(T, 25)
+end
+
+
+function ideal_dose_loss_gradient(dose::CuArray{T, N}, importance::CuArray{T, N}, ideal_dose::CuArray{T, N}) where {T, N}
+    return cu(ideal_dose_loss_gradient(
+        collect(dose),
+        collect(importance),
+        collect(ideal_dose),
+    ))
+end
+
+
+function minimum_loss(dose::AbstractArray{T, N}, minimum_dose::AbstractArray{T, N}) where {T, N}
+    return sum(max.(minimum_dose .- dose, 0)) / 100
+end
+
+
+function minimum_loss_gradient(dose::AbstractArray{T, N}, minimum_dose::AbstractArray{T, N}) where {T, N}
+    grad = similar(dose)
+    for i in 1:length(dose)
+        grad[i] = dose[i] < minimum_dose[i] ? convert(T, -1 / 100) : convert(T, 0)
     end
+    return grad
+end
 
 
-function build_loss_parts(dose::AbstractArray{T, N}, config::OptimisationConfiguration, safety_margin::T) where {T, N}
+function minimum_loss_gradient(dose::CuArray{T, N}, minimum_dose::CuArray{T, N}) where {T, N}
+    return cu(minimum_loss_gradient(collect(dose), collect(minimum_dose)))
+end
+
+
+function maximum_distribution_loss(dose::AbstractArray{T, N}, maximum_dose) where {T, N}
+    return sum(max.(dose .- maximum_dose, 0)) ./ 100
+end
+
+
+function maximum_distribution_loss_gradient(dose::AbstractArray{T, N}, maximum_dose) where {T, N}
+    return convert.(Float32, dose .> maximum_dose) ./ 100
+end
+
+
+function maximum_distribution_loss_gradient(dose::CuArray{T, N}, maximum_dose) where {T, N}
+    return cu(maximum_distribution_loss_gradient(collect(dose), collect(maximum_dose)))
+end
+
+
+function maximum_loss(dose::AbstractArray{T, N}, normalisation_dose) where {T, N}
+    return hotspot_loss(dose, convert(T, 1.05) .* normalisation_dose) * convert(T, 10.)
+end
+
+
+function maximum_loss_gradient(dose::AbstractArray{T, N}, normalisation_dose) where {T, N}
+    grad = similar(dose)
+    for i in 1:length(dose)
+        grad[i] = dose[i] > convert(T, 1.05) * normalisation_dose ? convert(T, 10) : convert(T, 0)
+    end
+    return grad
+end
+
+
+function maximum_loss_gradient(dose::CuArray{T, N}, normalisation_dose) where {T, N}
+    return cu(maximum_loss_gradient(collect(dose), normalisation_dose))
+end
+
+
+function oar_mean_loss(dose::AbstractArray{T, N}, mask, threshold) where {T, N}
+    mean = mean_dose(dose, mask)
+    return max(mean - threshold, zero(T))
+end
+
+
+function oar_mean_loss_gradient(dose::AbstractArray{T, N}, mask, threshold) where {T, N}
+    mean = mean_dose(dose, mask)
+    if mean >= threshold
+        return mask ./ sum(mask)
+    else
+        return zeros(T, length(dose))
+    end
+end
+
+
+function oar_mean_loss_gradient(dose::CuArray{T, N}, mask, threshold) where {T, N}
+    return cu(oar_mean_loss_gradient(collect(dose), collect(mask), threshold))
+end
+
+
+function normalisation_loss(dose, normalisation_mask, normalisation_dose)
+    return (mean_dose(dose, normalisation_mask) - normalisation_dose)^2
+end
+
+
+function normalisation_loss_gradient(dose, normalisation_mask, normalisation_dose)
+    return (2 / sum(normalisation_mask) * (mean_dose(dose, normalisation_mask) - normalisation_dose)) .* normalisation_mask
+end
+
+
+function build_loss_parts(dose::AbstractArray{T, N},
+                          config::OptimisationConfiguration,
+                          safety_margin::T) where {T, N}
     loss_parts = Dict{String, T}()
-    # hottest_target_dose = maximum([dose for (target_name, dose) in config.prescriptions.target_doses])
 
     # Normalise the dose distribution to make sure that a fulfilled prescription is
     # really fulfilled even after renormalisation.
-    dose = dose .* (config.normalisationDose / mean_dose(dose, config.normalisationStructureMask))
+    # dose = dose .* (config.normalisationDose / mean_dose(dose, config.normalisationStructureMask))
 
-    ideal_dose_loss = dot(
-        config.importance,
-        (config.idealDose .- dose).^2,
-    ) / sum(config.importance) / convert(T, 25)
-    loss_parts["ideal_dose_loss"] = ideal_dose_loss
+    # L_ideal
+    loss_parts["ideal_dose_loss"] = ideal_dose_loss(dose, config.importance, config.idealDose)
 
-    maximum_loss = hotspot_loss(dose, convert(T, 1.05) .* config.normalisationDose) * convert(T, 10.)
-    loss_parts["maximum_loss"] = maximum_loss
-
-    # for (target_name, target_dose) in config.prescriptions.target_doses
-    #     target_mask = config.structures[target_name]
-    #     # V95_loss = dvh_v_loss(
-    #     #     dose,
-    #     #     mask=target_mask,
-    #     #     d=convert(T, 0.95) * target_dose,
-    #     #     v=convert(T, 0.95),
-    #     #     # This constant regulates how much we approximate a voxel being "above" or "below" a threshold.
-    #     #     # Go 15% below the threshold, but not above.
-    #     #     R_low=convert(T, 0.15*target_dose),
-    #     #     R_high=zero(T),
-    #     # )
-    #     # loss_parts["V95_loss_$target_name"] = V95_loss
-
-        # Ensure minimum target coverage: V80% = 100%,
-        # i. e. no target voxel should receive less than 80% dose.
-        # minimum_loss = Dmin_loss(
-        #     dose,
-        #     target_mask,
-        #     convert(T, 0.90) * target_dose,
-        # )
-        # loss_parts["minimum_loss_$target_name"] = minimum_loss / convert(T, 500.)
-    # end
-
-    loss_parts["minimum_loss"] = sum(max.(config.minimumDose .- dose, 0)) / 100
-
+    # L_hom
     loss_parts["normalisation_variance"] = variance_dose(
         dose,
         config.normalisationStructureMask,
     )
 
-    # TODO: Add this for the highest dose target and cut the lower dose target.
-    # mean_loss = (mean_dose(dose, target_mask) - target_dose)^2
+    # L_norm
+    loss_parts["normalisation_loss"] = normalisation_loss(
+        dose,
+        config.normalisationStructureMask,
+        config.normalisationDose,
+    )
 
-    # Ensure homogeneity.
-    # homogeneity_loss = 0.1 * variance_dose(dose, config.normalisationStructureMask)
-    # loss_parts["homogeneity_loss"] = homogeneity_loss
+    # L_min
+    loss_parts["minimum_loss"] = minimum_loss(dose, config.minimumDose)
+
+    # L_max
+    loss_parts["maximum_loss"] = maximum_loss(dose, config.normalisationDose)
+    loss_parts["maximum_distribution_loss"] = maximum_distribution_loss(
+        dose,
+        config.maximumDose,
+    )
 
     # OAR loss parts.
     for constraint in config.prescriptions.constraints
@@ -275,16 +219,21 @@ function build_loss_parts(dose::AbstractArray{T, N}, config::OptimisationConfigu
         end
 
         if constraint.kind == constraint_mean
-            mean = mean_dose(dose, config.structures[constraint.structure_name])
-            l = max(mean - (constraint.dose - safety_margin), zero(T))
-            loss_parts["$(constraint.structure_name)_mean_loss"] = l
-        elseif (constraint.kind == constraint_max) || (((constraint.kind == constraint_dvh_d) || (constraint.kind == constraint_dvh_v)) && (constraint.volume ≈ convert(T, 0.02)))
-            l = Dmax_loss(
+            mask = config.structures[constraint.structure_name]
+            threshold = constraint.dose - safety_margin
+            loss_parts["$(constraint.structure_name)_mean_loss"] = oar_mean_loss(
                 dose,
-                config.structures[constraint.structure_name],
-                constraint.dose - safety_margin,
+                mask,
+                threshold,
             )
-            loss_parts["$(constraint.structure_name)_max_loss"] = l
+        elseif is_maximum_constraint(constraint)
+            mask = config.structures[constraint.structure_name]
+            threshold = constraint.dose - safety_margin
+            loss_parts["$(constraint.structure_name)_max_loss"] = Dmax_loss(
+                dose,
+                mask,
+                threshold,
+            )
         end
     end
     
@@ -292,11 +241,63 @@ function build_loss_parts(dose::AbstractArray{T, N}, config::OptimisationConfigu
 end
 
 
+function build_loss_gradient_parts(dose::AbstractArray{T, N},
+                                   config::OptimisationConfiguration,
+                                   safety_margin::T) where {T, N}
+    gradient_parts = Dict{String, typeof(dose)}()
+
+    gradient_parts["ideal_dose_loss"] = ideal_dose_loss_gradient(dose, config.importance, config.idealDose)
+    gradient_parts["normalisation_variance"] = variance_dose_gradient(
+        dose,
+        config.normalisationStructureMask,
+    )
+    gradient_parts["minimum_loss"] = minimum_loss_gradient(dose, config.minimumDose)
+    gradient_parts["maximum_loss"] = maximum_loss_gradient(dose, config.normalisationDose)
+    gradient_parts["maximum_distribution_loss"] = maximum_distribution_loss_gradient(
+        dose,
+        config.maximumDose,
+    )
+    gradient_parts["normalisation_loss"] = normalisation_loss_gradient(dose, config.normalisationStructureMask, config.normalisationDose)
+
+    # OAR loss parts.
+    for constraint in config.prescriptions.constraints
+        if constraint.priority == soft
+            continue
+        end
+
+        if constraint.kind == constraint_mean
+            mask = config.structures[constraint.structure_name]
+            threshold = constraint.dose - safety_margin
+            gradient_parts["$(constraint.structure_name)_mean_loss"] = oar_mean_loss_gradient(
+                dose,
+                mask,
+                threshold,
+            )
+        elseif is_maximum_constraint(constraint)
+            mask = config.structures[constraint.structure_name]
+            threshold = constraint.dose - safety_margin
+            gradient_parts["$(constraint.structure_name)_max_loss"] = Dmax_loss_gradient(
+                dose,
+                mask,
+                threshold,
+            )
+        end
+    end
+
+    return gradient_parts
+end
+
+
+
+
+
 # Version with logging.
-function dose_loss!(dose::AbstractArray{T, N}, config::OptimisationConfiguration, loss_parts::Dict{String, T}, subloss_weights::Dict{String, T}) where {T, N}
-    # OAR safety margin --> Make sure the dose threshold are kept by at least this margin.
-    safety_margin = convert(T, 0.2)
-    partial_losses = build_loss_parts(dose, config, safety_margin)
+function dose_loss!(dose::AbstractArray{T, N},
+                    config::OptimisationConfiguration,
+                    loss_parts::Dict{String, T},
+                    subloss_weights::Dict{String, T},
+                    oar_safety_margin::T) where {T, N}
+    partial_losses = build_loss_parts(dose, config, oar_safety_margin)
 
     for (key, value) in partial_losses
         loss_parts[key] = value
@@ -304,45 +305,93 @@ function dose_loss!(dose::AbstractArray{T, N}, config::OptimisationConfiguration
 
     loss = zero(T)
     for (name, value) in loss_parts
-        loss += subloss_weights[name] * value
+        if name in keys(subloss_weights)
+            loss += subloss_weights[name] * value
+        end
     end
 
     return loss
 end
 
 # Version without logging.
-function dose_loss(dose::AbstractArray{T, N}, config::OptimisationConfiguration, subloss_weights::Dict{String, T}) where {T, N}
-    # OAR safety margin --> Make sure the dose threshold are kept by at least this margin.
-    safety_margin = convert(T, 0.2)
-    partial_losses = build_loss_parts(dose, config, safety_margin)
+function dose_loss(dose::AbstractArray{T, N},
+                   config::OptimisationConfiguration,
+                   subloss_weights::Dict{String, T},
+                   oar_safety_margin::T) where {T, N}
+    partial_losses = build_loss_parts(dose, config, oar_safety_margin)
 
     loss = zero(T)
     for (name, value) in partial_losses
-        loss += subloss_weights[name] * value
+        if name in keys(subloss_weights)
+            loss += subloss_weights[name] * value
+        end
     end
 
     return loss
 end
 
 
-function dose_loss_gradient(dose, config::OptimisationConfiguration)
-    return Zygote.gradient(dose -> dose_loss(dose, config), dose)[1]
+function dose_loss_gradient(dose,
+                            config::OptimisationConfiguration,
+                            subloss_weights::Dict{String, T},
+                            oar_safety_margin::T) where {T}
+    partial_gradients = build_loss_gradient_parts(dose, config, oar_safety_margin)
+
+    gradient = zeros(T, length(dose))
+    for (name, value) in partial_gradients
+        if name in keys(subloss_weights)
+            gradient .+= collect(subloss_weights[name]) .* value
+        end
+    end
+
+    return gradient
 end
 
 
-function loss!(w, config::OptimisationConfiguration, loss_parts, subloss_weights::Dict{String, T}) where {T}
-    return dose_loss!(config.Dij * w, config, loss_parts, subloss_weights)
+function dose_loss_gradient(dose::CuArray,
+                            config::OptimisationConfiguration,
+                            subloss_weights::Dict{String, T},
+                            oar_safety_margin::T) where {T}
+    partial_gradients = build_loss_gradient_parts(dose, config, oar_safety_margin)
+
+    gradient = CUDA.zeros(T, length(dose))
+    for (name, value) in partial_gradients
+        if name in keys(subloss_weights)
+            gradient .+= subloss_weights[name] .* value
+        end
+    end
+
+    return gradient
 end
 
 
-function loss(w, config::OptimisationConfiguration, subloss_weights::Dict{String, T}) where {T}
-    return dose_loss(config.Dij * w, config, subloss_weights)
+function loss!(w,
+               config::OptimisationConfiguration,
+               loss_parts,
+               subloss_weights::Dict{String, T},
+               oar_safety_margin::T) where {T}
+    dose = reproducible_sparse_mv(config.Dij, w)
+    return dose_loss!(dose, config, loss_parts, subloss_weights, oar_safety_margin)
 end
 
 
-function loss_gradient(w, config::OptimisationConfiguration, subloss_weights::Dict{String, T}) where {T}
-    return Zygote.gradient(w -> loss(w, config, subloss_weights), w)[1]
-end;
+function loss(w,
+              config::OptimisationConfiguration,
+              subloss_weights::Dict{String, T},
+              oar_safety_margin::T) where {T}
+    dose = reproducible_sparse_mv(config.Dij, w)
+    return dose_loss(dose, config, subloss_weights, oar_safety_margin)
+end
+
+
+function loss_gradient(w,
+                       config::OptimisationConfiguration,
+                       subloss_weights::Dict{String, T},
+                       oar_safety_margin::T) where {T}
+    dose = reproducible_sparse_mv(config.Dij, w)
+    grad = dose_loss_gradient(dose, config, subloss_weights, oar_safety_margin)
+    return reproducible_sparse_mv(config.Dij_T, grad)
+end
 
 
 ################################################
