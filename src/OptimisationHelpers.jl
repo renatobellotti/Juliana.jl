@@ -1,4 +1,5 @@
 using StaticArrays
+using SparseArrays
 
 
 function get_optimisation_configuration(ct::Juliana.ScalarGrid,
@@ -89,7 +90,7 @@ function get_optimisation_configuration(ct::Juliana.ScalarGrid,
         optimisation_point_indices,
     ))
 
-    opt_Dij = Dij
+    opt_Dij, opt_Dij_T = prepare_Dij_and_transpose(Dij)
 
     # Explicit type is mandatory to get type stable code.
     # Otherwise the VolumeType will be CuArray{Float32, 1} instead of
@@ -104,10 +105,20 @@ function get_optimisation_configuration(ct::Juliana.ScalarGrid,
         opt_minimum_dose,
         opt_maximum_dose,
         opt_Dij,
-        opt_Dij',
+        opt_Dij_T,
         opt_structures,
         prescriptions,
     )
+end
+
+
+function prepare_Dij_and_transpose(Dij::SparseMatrixCSC)
+    return Dij, convert(typeof(Dij), Dij')
+end
+
+
+function prepare_Dij_and_transpose(Dijs::Vector{SparseMatrixCSC{T, U}}) where {T <: Real, U <: Integer}
+    return [Dij for Dij in Dijs], [convert(typeof(Dij), Dij') for Dij in Dijs]
 end
 
 

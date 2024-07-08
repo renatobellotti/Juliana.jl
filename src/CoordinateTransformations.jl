@@ -143,3 +143,145 @@ function Juliana.StuToXyz(points::Matrix{T}, field::Juliana.FieldDefinition) whe
         field.couchAngle,
     )
 end
+
+
+# Spot energy and (t, u) to STU and XYZ.
+function spot_position_s(spot_t::T,
+                         spot_u::T,
+                         spot_range::T,
+                         wed_cube,
+                         wed_grid,
+                         gantry_angle::T,
+                         couch_angle::T,
+                         iso_center,
+                         s_min::T,
+                         s_max::T,
+                         ds::T) where {T <: Real}
+    range_diff_best = Inf
+    s_best = -1
+    wed_best = -1
+    for s in s_min:ds:s_max
+        # Evaluate the WED at the new point.
+        xyz = Juliana.StuToXyz(
+            s,
+            spot_t,
+            spot_u,
+            iso_center,
+            gantry_angle,
+            couch_angle,
+        )
+        index = Juliana.xyz_to_index(xyz, wed_grid)
+        wed = wed_cube[index[1], index[2], index[3]]
+        range_diff = abs(wed - spot_range)
+
+        # Check whether the new point is closer to the desired best WED.
+        if (s_best == -1) || (range_diff < range_diff_best)
+            s_best = s
+            range_diff_best = range_diff
+            wed_best = wed
+        end
+    end
+    return s_best
+end
+
+
+function spot_position_stu(wed::Juliana.ScalarGrid,
+                           field::Juliana.FieldDefinition,
+                           s_min,
+                           s_max,
+                           ds::T,
+                           ddc::Juliana.LookUpTable) where {T <: Real}
+    iso_center = (
+        field.fieldCenter["x"],
+        field.fieldCenter["y"],
+        field.fieldCenter["z"],
+    )
+    positions = Matrix{T}(undef, 3, length(field.spots))
+    for (i, spot) in enumerate(field.spots)
+        range = Juliana.get_range(ddc, spot.energykeV) - spot.numberOfAbsorbers * Juliana.PREABSORBER_WED
+        s = spot_position_s(
+            spot.t,
+            spot.u,
+            range,
+            wed.data,
+            wed.grid,
+            field.gantryAngle,
+            field.couchAngle,
+            iso_center,
+            s_min,
+            s_max,
+            ds,
+        )
+        positions[:, i] .= (s, spot.t, spot.u)
+    end
+    return positions
+end
+
+
+function spot_position_stu(ct::Juliana.ScalarGrid,
+                           field::Juliana.FieldDefinition,
+                           placement_mask::Juliana.ScalarGrid,
+                           ds::T,
+                           tps::Juliana.JulianaTps) where {T <: Real}
+    iso_center = (
+        field.fieldCenter["x"],
+        field.fieldCenter["y"],
+        field.fieldCenter["z"],
+    )
+
+    # Get s-extent to search for a matching position.
+    points, indices = Juliana.mask_to_points_and_indices(
+        placement_mask.grid,
+        placement_mask.data,
+    )
+    points_stu = Juliana.XyzToStu(
+        points,
+        iso_center,
+        field.gantryAngle,
+        field.couchAngle,
+    )
+
+    s_min = minimum(points_stu[1, :])
+    s_max = maximum(points_stu[1, :])
+
+    densities = Juliana.ScalarGrid(
+        tps.convert_to_sp.(ct.data),
+        ct.grid,
+    )
+
+    wed_cube = Juliana.calculate_wed(
+        densities,
+        field.gantryAngle,
+        field.couchAngle,
+        ct.grid,
+    )
+
+    return spot_position_stu(
+        wed_cube,
+        field,
+        s_min,
+        s_max,
+        ds,
+        tps.d_depth_dose_curves,
+    )
+end
+
+
+function spot_position_xyz(ct::Juliana.ScalarGrid,
+                           field::Juliana.FieldDefinition,
+                           placement_mask::Juliana.ScalarGrid,
+                           ds::T,
+                           tps::Juliana.JulianaTps) where {T <: Real}
+    positions_stu = spot_position_stu(
+        ct,
+        field,
+        placement_mask,
+        ds,
+        tps,
+    )
+
+    return Juliana.StuToXyz(
+        positions_stu,
+        field,
+    )
+end

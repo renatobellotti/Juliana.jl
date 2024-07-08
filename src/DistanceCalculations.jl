@@ -135,38 +135,43 @@ Size of contour: (3, N)
 """
 function contour_line_intersections(line_value::T, contour::AbstractArray{T, 2}, y_spacing::T) where {T}
     N = size(contour, 2)
-    intersection_points = Set{Tuple{T, T}}()
+    intersection_points = Vector{Tuple{T, T}}()
     for i in 1:N
         p0 = (contour[1, i], contour[2, i])
         p1 = (contour[1, mod1(i+1, N)], contour[2, mod1(i+1, N)])
 
-        # The line is close to a contour node.
-        # Assumption: There is at most one contour point per voxel.
-        if abs(p0[2] - line_value) <= convert(T, 1e-6)
-            push!(intersection_points, p0)
-            continue
-        end
-        if abs(p1[2] - line_value) <= convert(T, 1e-6)
-            push!(intersection_points, p1)
+        # Intersection conting rules:
+        # https://web.archive.org/web/20130126163405/http://geomalgorithms.com/a03-_inclusion.html
+        # 1.) an upward edge includes its starting endpoint, and excludes its final endpoint;
+        # 2.) a downward edge excludes its starting endpoint, and includes its final endpoint;
+        # 3.) horizontal edges are excluded
+        # 4.) the edge-ray intersection point must be strictly right of the point P.
+        intersects_p0 = abs(p0[2] - line_value) < 1e-6
+        intersects_p1 = abs(p1[2] - line_value) < 1e-6
+
+        is_upward = p1[2] > p0[2]
+        is_downward = p1[2] < p0[2]
+        is_horizontal = (!is_upward) && (!is_downward)
+        
+        if is_horizontal
             continue
         end
 
+        if intersects_p0
+            if is_upward
+                push!(intersection_points, p0)
+            end
+            continue
+        end
 
-        # Avoid division by zero for contour lines that are parallel to and
-        # close to the scan line.
-        if (abs(p0[2] - p1[2]) <= convert(T,1e-6)) &&
-           (abs(p0[2] - line_value) <= convert(T, 1e-6))
-            # The line is close to the scan line.
-            push!(intersection_points, p0)
-            push!(intersection_points, p1)
+        if intersects_p1
+            if is_downward
+                push!(intersection_points, p1)
+            end
             continue
         end
 
         t = (line_value - p0[2]) / (p1[2] - p0[2])
-
-        INTERSECTION_TOLERANCE = convert(T, 0.5) * y_spacing
-        t_tolerance = INTERSECTION_TOLERANCE / norm(p1 .- p0)
-
         if (0. <= t) && (t <= 1.)
             push!(intersection_points, p0 .+ t .* (p1 .- p0))
         end

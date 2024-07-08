@@ -36,16 +36,29 @@ function optimise(w::AbstractArray{T, N},
                   weight_log_directory::String="",
                   weight_log_period=0,
                   maximum_iterations=3000,
-                  initial_iteration=1) where {T, N}
+                  initial_iteration=1,
+                  robust=false,
+                  robust_reduction::ReductionType=maximum) where {T, N, ReductionType}
     function my_loss(w)
         clamp!(w, minimum_spot_weight, typemax(T))
-        loss = Juliana.loss!(
-            w,
-            config,
-            Dict{String, Float32}(),
-            subloss_weights,
-            oar_safety_margin,
-        )
+        if robust
+            loss = Juliana.robust_loss!(
+                w,
+                config,
+                Dict{String, Float32}(),
+                subloss_weights,
+                oar_safety_margin,
+                robust_reduction
+            )
+        else
+            loss = Juliana.loss!(
+                w,
+                config,
+                Dict{String, Float32}(),
+                subloss_weights,
+                oar_safety_margin,
+            )
+        end
 
         return loss
     end
@@ -53,7 +66,22 @@ function optimise(w::AbstractArray{T, N},
     function my_loss_gradient!(gradient, w)
         clamp!(w, minimum_spot_weight, typemax(T))
 
-        grad = Juliana.loss_gradient(w, config, subloss_weights, oar_safety_margin)
+        if robust
+            grad = Juliana.robust_loss_gradient(
+                w,
+                config,
+                subloss_weights,
+                oar_safety_margin,
+                robust_reduction,
+            )
+        else
+            grad = Juliana.loss_gradient(
+                w,
+                config,
+                subloss_weights,
+                oar_safety_margin,
+            )
+        end
         gradient[:] = grad[:]
     end
 
@@ -89,11 +117,16 @@ function optimise(w::AbstractArray{T, N},
         loss_parts = Dict{String, T}()
         w = state.x
         clamp!(w, minimum_spot_weight, typemax(T))
-        loss = Juliana.loss!(w, config, loss_parts, subloss_weights, oar_safety_margin)
+        if robust
+            loss = Juliana.robust_loss!(w, config, loss_parts, subloss_weights, oar_safety_margin, robust_reduction)
+            grad = Juliana.robust_loss_gradient(w, config, subloss_weights, oar_safety_margin, robust_reduction)
+        else
+            loss = Juliana.loss!(w, config, loss_parts, subloss_weights, oar_safety_margin)
+            grad = Juliana.loss_gradient(w, config, subloss_weights, oar_safety_margin)
+        end
         println(loss)
         loss_parts["total_loss"] = loss
         push!(history, copy(loss_parts))
-        grad = Juliana.loss_gradient(w, config, subloss_weights, oar_safety_margin)
         push!(gradients, grad)
 
         # Dump weights to disk.

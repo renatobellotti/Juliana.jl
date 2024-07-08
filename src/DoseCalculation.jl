@@ -12,6 +12,7 @@ using KernelAbstractions
 # A constant in Fiona, so we just keep it  as it is.
 const PREABSORBER_WED =  4.173f0
 const MIN_DIJ_CONTRIBUTION = convert(Float32, 1.e-8)
+const HU_AIR = -900
 
 
 """
@@ -499,6 +500,12 @@ function calculate_dose(tps::Juliana.JulianaTps,
     )
     points, indices = Juliana.grid_to_points_and_indices(dose_calc_grid)
 
+    ct_dose_calc_grid = Juliana.interpolate_linearly(ct, dose_calc_grid)
+    point_not_air = Juliana.volume_at_indices(ct_dose_calc_grid.data, indices) .> HU_AIR
+
+    points = points[:, point_not_air]
+    indices = indices[:, point_not_air]
+
     densities = Juliana.ScalarGrid(
         tps.convert_to_sp.(ct.data),
         ct.grid,
@@ -520,7 +527,12 @@ function calculate_dose(tps::Juliana.JulianaTps,
         convert.(Float32, Juliana.flat_vector_to_cube(dose_calc_grid, indices, dose)),
         dose_calc_grid,
     )
-    dose_cube = interpolate_linearly(dose_cube, ct.grid)
+    not_air_cube = Juliana.ScalarGrid(
+        # Select only the not-air voxels to match with the indices array.
+        convert.(Float32, Juliana.flat_vector_to_cube(dose_calc_grid, indices, point_not_air[point_not_air])),
+        dose_calc_grid,
+    )
+    dose_cube = interpolate_linearly(dose_cube, not_air_cube, ct.grid)
 
     return dose_cube
 end

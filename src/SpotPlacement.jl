@@ -77,9 +77,9 @@ function place_spots_on_grid(field::Juliana.FieldDefinition,
     stu_grid = build_stu_grid(
         field,
         placement_structure;
-        placement_margin=0.5,
-        lateral_spacing=0.4,
-        depth_spacing=0.2,
+        placement_margin=placement_margin,
+        lateral_spacing=lateral_spacing,
+        depth_spacing=depth_spacing,
     )
     s_min, t_min, u_min = stu_grid.origin
     s_max, t_max, u_max = stu_grid.origin .+ stu_grid.spacing .* stu_grid.size

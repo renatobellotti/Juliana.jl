@@ -170,7 +170,11 @@ function read_dicom_ct(paths)
     for i in 1:length(paths)-1
         slice_separations[i] = img_position[i+1, 3] - img_position[i, 3]
     end
-    @assert all(slice_separations[1] .== slice_separations)
+    if !all(slice_separations[1] .== slice_separations)
+        @warn "Not all CT slices have the exactly same spacing!"
+    end
+    # Less than one 100th of a mm difference.
+    @assert maximum(abs.(slice_separations[1] .- slice_separations)) < 1e-3
     
     origin = img_position[1, :] ./ 10.f0
     values = convert.(Int16, slope .* cat(slices..., dims=3) .+ intercept)
@@ -390,8 +394,8 @@ function dose_to_dicom(dose::ScalarGrid,
     # https://dicom.innolitics.com/ciods/ct-image/image-pixel/00280103
     dicom_dose.PixelRepresentation = 0
     dicom_dose.HighBit = 15
-    dicom_dose.Rows = size(data, 1)
-    dicom_dose.Columns = size(data, 2)
+    dicom_dose.Rows = size(data, 2)
+    dicom_dose.Columns = size(data, 1)
     dicom_dose.NumberOfFrames = size(data, 3)
     dicom_dose.PixelSpacing = [
         spacing[1],

@@ -1,5 +1,6 @@
 using Adapt
 using StaticArrays
+using SparseArrays
 
 
 struct Grid{S<:Real, T<:Integer}
@@ -131,6 +132,37 @@ function to_gpu(config::Juliana.OptimisationConfiguration)
     opt_maximum_dose = cu(config.maximumDose)
     opt_Dij = CUDA.CUSPARSE.CuSparseMatrixCSR(config.Dij)
     opt_Dij_T = CUDA.CUSPARSE.CuSparseMatrixCSR(config.Dij')
+    opt_structures = Dict{String, typeof(opt_ideal_dose)}()
+    for (name, structure) in config.structures
+        opt_structures[name] = cu(structure)
+    end
+    prescriptions = config.prescriptions
+    return Juliana.OptimisationConfiguration{typeof(config.normalisationDose), typeof(opt_ct), typeof(opt_Dij)}(
+        config.normalisationDose,
+        opt_target_mask,
+        opt_ct,
+        opt_ideal_dose,
+        opt_importance,
+        opt_minimum_dose,
+        opt_maximum_dose,
+        opt_Dij,
+        opt_Dij_T,
+        opt_structures,
+        config.prescriptions,
+    )
+end
+
+
+# function for moving a multi-Dij (i. e. robust) configuration to the GPU.
+function to_gpu(config::Juliana.OptimisationConfiguration{NumberType, VolumeType, Vector{SparseMatrixCSC{ValType, IntType}}}) where {NumberType, VolumeType, ValType <: Real, IntType <: Integer}
+    opt_target_mask = cu(config.normalisationStructureMask)
+    opt_ct = cu(config.ct)
+    opt_ideal_dose = cu(config.idealDose)
+    opt_importance = cu(config.importance)
+    opt_minimum_dose = cu(config.minimumDose)
+    opt_maximum_dose = cu(config.maximumDose)
+    opt_Dij = [CUDA.CUSPARSE.CuSparseMatrixCSR(Dij) for Dij in config.Dij]
+    opt_Dij_T = [CUDA.CUSPARSE.CuSparseMatrixCSR(Dij_T) for Dij_T in config.Dij_T]
     opt_structures = Dict{String, typeof(opt_ideal_dose)}()
     for (name, structure) in config.structures
         opt_structures[name] = cu(structure)

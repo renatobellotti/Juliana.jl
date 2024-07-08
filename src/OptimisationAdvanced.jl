@@ -167,7 +167,9 @@ function optimise_head_and_neck(config,
                                 early_stopping_patience,
                                 weight_log_period,
                                 maximum_iterations,
-                                AUTO_STRUCTURE_PREFIX)
+                                AUTO_STRUCTURE_PREFIX,
+                                robust=false,
+                                robust_reduction::ReductionType=maximum) where {ReductionType}
     weight_log_dir = "$(output_dir)/weights"
     mkpath(weight_log_dir)
     
@@ -212,6 +214,8 @@ function optimise_head_and_neck(config,
         weight_log_directory=weight_log_dir,
         weight_log_period=weight_log_period,
         maximum_iterations=maximum_iterations,
+        robust=robust,
+        robust_reduction=robust_reduction,
     )
     
     n_iterations_so_far = size(history, 1)
@@ -260,6 +264,8 @@ function optimise_head_and_neck(config,
         weight_log_period=weight_log_period,
         maximum_iterations=maximum_iterations,
         initial_iteration=n_iterations_so_far,
+        robust=robust,
+        robust_reduction=robust_reduction,
     )
 
     n_iterations_so_far += size(history2, 1)
@@ -301,6 +307,8 @@ function optimise_head_and_neck(config,
         weight_log_period=weight_log_period,
         maximum_iterations=maximum_iterations,
         initial_iteration=n_iterations_so_far,
+        robust=robust,
+        robust_reduction=robust_reduction,
     )
 
     n_iterations_so_far += size(history3, 1)

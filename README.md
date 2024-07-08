@@ -9,8 +9,8 @@ Implementation of a spot (and later probably beam angle) optimiser in Julia.
    ```bash
    git clone git@gitlab.psi.ch:bellotti_r/differentiable-planning.git
    ```
-3. Install Julia using [the official instructions](https://julialang.org/downloads/).
-4. Open a Julia command line from within the JulianA repo by typing ``julia`` in a terminal. Then type the following and hit enter to setup a development version of the ``Juliana`` package (i. e. local edits to the files will be visible when you import the package in a fresh session). The following command will download all dependencies and setup the package for local development. The bracket ``]`` command will switch to the package manager mode of the Julia REPL, which makes it easier to deal with packages and environments. 
+3. Install Julia using [the official instructions](https://julialang.org/downloads/). You need to install version 1.8: ``juliaup add 1.8``.
+4. Open a Julia command line from within the JulianA repo by typing ``julia +1.8`` in a terminal. Then type the following and hit enter to setup a development version of the ``Juliana`` package (i. e. local edits to the files will be visible when you import the package in a fresh session). The following command will download all dependencies and setup the package for local development. The bracket ``]`` command will switch to the package manager mode of the Julia REPL, which makes it easier to deal with packages and environments. 
    ```julia
    ] dev .
    ```
@@ -26,6 +26,12 @@ Implementation of a spot (and later probably beam angle) optimiser in Julia.
    notebook()
    ```
    The ``notebook()`` command will start a local Jupyter server and open a browser so you can start editing. The first two lines are needed only once for the installation of Jupyter itself.
+
+
+## Building documentation
+```shell
+julia docs/make.jl
+```
 
 
 ## TPS integration

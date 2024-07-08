@@ -28,6 +28,7 @@ include("Tps.jl")
 include("Robustness.jl")
 include("OptimisationAdvanced.jl")
 include("SteeringFiles.jl")
+include("TROTS.jl")
 # This should always be the last file to be included.
 include("Precompile.jl")
 

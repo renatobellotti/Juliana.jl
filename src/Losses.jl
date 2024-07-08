@@ -394,6 +394,160 @@ function loss_gradient(w,
 end
 
 
+#############
+# Robustness
+#############
+function robust_dose_loss!(dose_distributions,
+                           config::OptimisationConfiguration,
+                           loss_parts::Dict{String, T},
+                           subloss_weights::Dict{String, T},
+                           oar_safety_margin::T,
+                           reduction::ReductionType) where {T, ReductionType}
+    all_partial_losses = [build_loss_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+
+    for metric in keys(all_partial_losses[1])
+        l = reduction([parts[metric] for parts in all_partial_losses])
+        loss_parts[metric] = l
+    end
+
+    loss = zero(T)
+    for (name, value) in loss_parts
+        if name in keys(subloss_weights)
+            loss += subloss_weights[name] * value
+        end
+    end
+
+    return loss
+end
+
+
+function robust_dose_loss(dose_distributions,
+                          config::OptimisationConfiguration,
+                          subloss_weights::Dict{String, T},
+                          oar_safety_margin::T,
+                          reduction::ReductionType) where {T, ReductionType}
+    all_partial_losses = [build_loss_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+
+    loss = zero(T)
+    for name in keys(all_partial_losses[1])
+        if name in keys(subloss_weights)
+            value = reduction([parts[metric] for parts in all_partial_losses])
+            loss += subloss_weights[name] * value
+        end
+    end
+
+    return loss
+end
+
+
+function robust_dose_loss_gradient(dose_distributions,
+                                   config::OptimisationConfiguration,
+                                   subloss_weights::Dict{String, T},
+                                   oar_safety_margin::T,
+                                   reduction::ReductionType) where {T, ReductionType}
+    all_partial_losses = [build_loss_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+    all_partial_loss_gradients = [build_loss_gradient_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+
+    gradient = zeros(T, length(dose))
+    for name in keys(all_partial_losses[1])
+        if name in keys(subloss_weights)
+            losses = [parts[metric] for parts in all_partial_losses]
+            l = reduction(losses)
+            i = findfirst(losses .== l)
+            value = all_partial_loss_gradients[i][name]
+            gradient .+= collect(subloss_weights[name]) .* value
+        end
+    end
+
+    return gradient
+end
+
+
+function robust_dose_loss_gradient(dose_distributions::Vector{U},
+                                   config::OptimisationConfiguration,
+                                   subloss_weights::Dict{String, T},
+                                   oar_safety_margin::T) where {T, U <: CuArray}
+    all_partial_losses = [build_loss_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+    all_partial_loss_gradients = [build_loss_gradient_parts(dose, config, oar_safety_margin) for dose in dose_distributions]
+
+    gradient = CUDA.zeros(T, length(dose))
+    for name in keys(all_partial_losses[1])
+        if name in keys(subloss_weights)
+            losses = [parts[metric] for parts in all_partial_losses]
+            l = reduction(losses)
+            i = findfirst(losses .== l)
+            value = all_partial_loss_gradients[i][name]
+            gradient .+= collect(subloss_weights[name]) .* value
+        end
+    end
+
+    return gradient
+end
+
+
+# The reduction operation must be linear!
+function robust_loss!(w,
+                      config::OptimisationConfiguration,
+                      loss_parts,
+                      subloss_weights::Dict{String, T},
+                      oar_safety_margin::T,
+                      reduction::ReductionType=maximum) where {T, ReductionType}
+    doses = [reproducible_sparse_mv(Dij, w) for Dij in config.Dij]
+    return robust_dose_loss!(
+        doses,
+        config,
+        loss_parts,
+        subloss_weights,
+        oar_safety_margin,
+        reduction,
+    )
+end
+
+
+function robust_loss(w,
+                     config::OptimisationConfiguration,
+                     subloss_weights::Dict{String, T},
+                     oar_safety_margin::T,
+                     reduction::ReductionType=maximum) where {T, ReductionType}
+    doses = [reproducible_sparse_mv(Dij, w) for Dij in config.Dij]
+    return robust_dose_loss(
+        doses,
+        config,
+        subloss_weights,
+        oar_safety_margin,
+        reduction,
+    )
+end
+
+
+# The reduction operation must be linear so that
+# grad(reduction(losses)) == reduction(grad(losses))
+function robust_loss_gradient(w,
+                              config::OptimisationConfiguration,
+                              subloss_weights::Dict{String, T},
+                              oar_safety_margin::T,
+                              reduction::ReductionType=maximum) where {T, ReductionType}
+    doses = [reproducible_sparse_mv(Dij, w) for Dij in config.Dij]
+
+    all_partial_losses = [build_loss_parts(dose, config, oar_safety_margin) for dose in doses]
+    all_partial_loss_gradients = [build_loss_gradient_parts(dose, config, oar_safety_margin) for dose in doses]
+
+    gradient = CUDA.zeros(T, size(w, 1))
+    for name in keys(all_partial_losses[1])
+        if name in keys(subloss_weights)
+            losses = [parts[name] for parts in all_partial_losses]
+            l = reduction(losses)
+            i = findfirst(losses .== l)
+            value = all_partial_loss_gradients[i][name]
+            grad = subloss_weights[name] .* value
+            gradient .+= reproducible_sparse_mv(config.Dij_T[i], grad)
+        end
+    end
+
+    return gradient
+end
+
+
 ################################################
 # Define default types.
 ################################################
